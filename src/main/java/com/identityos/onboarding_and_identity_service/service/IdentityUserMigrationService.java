@@ -57,6 +57,16 @@ public class IdentityUserMigrationService {
             try {
                 String externalUsername = user.username().trim();
                 String keycloakUsername = keycloakUsername(application.applicationId(), externalUsername);
+                var existing = identityUserRepository.findByApplicationAndUsername(application.applicationId(), externalUsername);
+                if (existing.isPresent()) {
+                    if (user.externalUserId() == null || !user.externalUserId().equals(existing.get().externalUserId())) {
+                        throw new IllegalArgumentException("Existing username has another identity; resolve the conflict before migration.");
+                    }
+                    successCount++;
+                    results.add(new UserMigrationResult(rowNumber, externalUsername, keycloakUsername, null,
+                            "SUCCESS", "Previously migrated identity preserved; credentials were not changed."));
+                    continue;
+                }
                 boolean sendPasswordSetupEmail = Boolean.TRUE.equals(request.sendPasswordSetupEmail());
                 String temporaryPassword = sendPasswordSetupEmail ? null : passwordFor(user, request.defaultTemporaryPassword());
                 boolean temporaryPasswordRequired = request.temporaryPasswordRequired() == null || request.temporaryPasswordRequired();

@@ -87,47 +87,10 @@ public class HostedIdentityService {
             recordRegistrationSignals(application, externalUsername, request.verificationStatus());
             return response;
         } catch (IllegalStateException exception) {
-            if (!exception.getMessage().toLowerCase().contains("already registered")) {
-                throw new ResponseStatusException(HttpStatus.CONFLICT, exception.getMessage(), exception);
-            }
-            HostedIdentityAuthResponse response = new HostedIdentityAuthResponse(
-                    true,
-                    "Registration completed successfully.",
-                    externalUsername,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null);
-            upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields(), request.verificationStatus(), "SELF_REGISTRATION");
-            auditService.hostedIdentityRegistered(
-                    application.organizationId(),
-                    application.applicationId(),
-                    request.clientId(),
-                    externalUsername,
-                    response);
-            recordRegistrationSignals(application, externalUsername, request.verificationStatus());
-            return response;
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Registration could not be completed.", exception);
         } catch (RestClientResponseException exception) {
             if (exception.getStatusCode().value() == 409) {
-                HostedIdentityAuthResponse response = new HostedIdentityAuthResponse(
-                        true,
-                        "Registration completed successfully.",
-                        externalUsername,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null);
-                upsertIdentityUser(application, externalUsername, keycloakUsername, null, email, request.fields(), request.verificationStatus(), "SELF_REGISTRATION");
-                auditService.hostedIdentityRegistered(
-                        application.organizationId(),
-                        application.applicationId(),
-                        request.clientId(),
-                        externalUsername,
-                        response);
-                recordRegistrationSignals(application, externalUsername, request.verificationStatus());
-                return response;
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Username is already registered.", exception);
             }
             String detail = exception.getResponseBodyAsString();
             String message = detail == null || detail.isBlank()
@@ -339,15 +302,8 @@ public class HostedIdentityService {
     }
 
     private JsonNode authenticateUsernameWithSetupRepair(String keycloakUsername, String externalUsername, String password) {
-        try {
-            return keycloakAdminClient.authenticateApplicationUser(keycloakUsername, password);
-        } catch (HttpClientErrorException.BadRequest exception) {
-            if (!isAccountSetupError(exception)) {
-                throw exception;
-            }
-            keycloakAdminClient.completeApplicationUserSetup(keycloakUsername, externalUsername, password);
-            return keycloakAdminClient.authenticateApplicationUser(keycloakUsername, password);
-        }
+        // Required actions must be completed in Keycloak, never cleared by an unauthenticated login.
+        return keycloakAdminClient.authenticateApplicationUser(keycloakUsername, password);
     }
 
     private boolean isAccountSetupError(RestClientResponseException exception) {
@@ -366,6 +322,8 @@ public class HostedIdentityService {
             String source) {
         try {
             Map<String, Object> attributes = new java.util.LinkedHashMap<>(fields);
+            attributes.keySet().removeIf(name -> name.toLowerCase(java.util.Locale.ROOT)
+                    .matches(".*(password|secret|token|otp).*"));
             addVerificationAttributes(attributes, verificationStatus);
             UserMigrationUserRequest user = new UserMigrationUserRequest(
                     null,

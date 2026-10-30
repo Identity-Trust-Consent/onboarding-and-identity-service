@@ -13,7 +13,7 @@ public record ApplicationResponse(
         String description,
         String redirectUri,
         String clientId,
-        String clientSecret,
+        @com.fasterxml.jackson.annotation.JsonIgnore String clientSecret,
         String status,
         BigDecimal trustScore,
         LocalDateTime createdAt

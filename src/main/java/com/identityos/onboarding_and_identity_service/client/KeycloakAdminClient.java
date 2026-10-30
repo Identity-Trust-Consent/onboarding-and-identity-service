@@ -3,6 +3,7 @@ package com.identityos.onboarding_and_identity_service.client;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.stereotype.Component;
@@ -10,8 +11,10 @@ import org.springframework.web.client.RestClient;
 
 import java.time.Duration;
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 
@@ -24,6 +27,8 @@ public class KeycloakAdminClient {
     private final String userClientId;
     private final String username;
     private final String password;
+    @Value("${keycloak.admin.client-secret:}")
+    private String adminClientSecret = "";
 
     public KeycloakAdminClient(
             RestClient.Builder builder,
@@ -124,6 +129,8 @@ public class KeycloakAdminClient {
             Map<String, Object> submittedFields) {
         String token = requestAdminToken();
         String userId = findUserIdByUsername(token, keycloakUsername);
+        if (userId != null) throw new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.CONFLICT, "Username is already registered.");
         String usersGroupId = ensureGroupHierarchy(token, organizationId, applicationId);
         if (userId == null) {
             userId = createApplicationUserInKeycloak(
@@ -137,17 +144,9 @@ public class KeycloakAdminClient {
                     clientId,
                     submittedFields);
         } else {
-            updateApplicationUserSetup(
-                    token,
-                    userId,
-                    keycloakUsername,
-                    externalUsername,
-                    email,
-                    organizationId,
-                    applicationId,
-                    clientId,
-                    submittedFields);
-            resetApplicationUserPassword(token, userId, password);
+            // Registration must never serve as unauthenticated password recovery.
+            throw new org.springframework.web.server.ResponseStatusException(
+                    org.springframework.http.HttpStatus.CONFLICT, "Username is already registered.");
         }
         joinGroup(token, userId, usersGroupId);
         assignApplicationUserRole(token, userId);
@@ -170,6 +169,18 @@ public class KeycloakAdminClient {
             Map<String, Object> submittedFields) {
         String token = requestAdminToken();
         String userId = findUserIdByUsername(token, keycloakUsername);
+        if (userId != null) {
+            JsonNode existing = getUser(token, userId);
+            String externalId = submittedFields == null ? "" : String.valueOf(submittedFields.getOrDefault("external_user_id", ""));
+            if (externalId.isBlank()
+                    || !externalId.equals(existing.path("attributes").path("external_user_id").path(0).asText())
+                    || !applicationId.equals(existing.path("attributes").path("application_id").path(0).asText())
+                    || !organizationId.equals(existing.path("attributes").path("organization_id").path(0).asText())) {
+                throw new IllegalStateException("Keycloak username collision requires explicit identity reconciliation.");
+            }
+            // Resume a partially completed import without resetting credentials, email or required actions.
+            return userId;
+        }
         String usersGroupId = ensureGroupHierarchy(token, organizationId, applicationId);
         Map<String, Object> fields = new LinkedHashMap<>();
         if (submittedFields != null) {
@@ -278,12 +289,171 @@ public class KeycloakAdminClient {
         return response;
     }
 
+    /** Creates/updates only integration-owned clients; never changes another application's client. */
+    public Map<String,Object> provisionIntegrationClient(String applicationId, String organizationId,
+            com.identityos.onboarding_and_identity_service.integration.IntegrationConfiguration config) {
+        String token=requestAdminToken();
+        String oidcId="identityos-"+applicationId;
+        String uuid=upsertIntegrationClient(token,oidcId,applicationId,organizationId,config,false);
+        String serviceUuid=upsertIntegrationClient(token,oidcId+"-service",applicationId,organizationId,config,true);
+        return Map.of("clientId",oidcId,"keycloakClientUuid",uuid,"serviceClientId",oidcId+"-service",
+                "serviceClientUuid",serviceUuid);
+    }
+
+    public Map<String,Object> integrationCredentials(String applicationId,
+            com.identityos.onboarding_and_identity_service.integration.IntegrationConfiguration config) {
+        String token=requestAdminToken();
+        Map<String,Object> result=new LinkedHashMap<>();
+        for(String id:List.of("identityos-"+applicationId,"identityos-"+applicationId+"-service")) {
+            JsonNode client=findIntegrationClient(token,id);
+            if(client==null || !applicationId.equals(client.path("attributes").path("identityos.application_id").asText()))
+                throw new IllegalStateException("Integration client has not been provisioned");
+            if(!client.path("publicClient").asBoolean()) {
+                JsonNode secret=restClient.get().uri("/admin/realms/"+targetRealm+"/clients/"+client.path("id").asText()+"/client-secret")
+                    .headers(h->h.setBearerAuth(token)).retrieve().body(JsonNode.class);
+                result.put(id,secret.path("value").asText());
+            }
+        }
+        return result;
+    }
+
+    public void setIntegrationClientsEnabled(String applicationId,boolean enabled) {
+        String token=requestAdminToken();
+        for(String id:List.of("identityos-"+applicationId,"identityos-"+applicationId+"-service")) {
+            JsonNode client=findIntegrationClient(token,id);
+            if(client!=null && applicationId.equals(client.path("attributes").path("identityos.application_id").asText()))
+                restClient.put().uri("/admin/realms/"+targetRealm+"/clients/"+client.path("id").asText())
+                    .headers(h->h.setBearerAuth(token)).body(Map.of("enabled",enabled)).retrieve().toBodilessEntity();
+        }
+    }
+
+    private JsonNode findIntegrationClient(String token,String id) {
+        JsonNode clients=restClient.get().uri(b->b.path("/admin/realms/"+targetRealm+"/clients").queryParam("clientId",id).build())
+            .headers(h->h.setBearerAuth(token)).retrieve().body(JsonNode.class);
+        return clients!=null && !clients.isEmpty()?clients.get(0):null;
+    }
+
+    private String upsertIntegrationClient(String token,String id,String app,String org,
+            com.identityos.onboarding_and_identity_service.integration.IntegrationConfiguration config,boolean machine) {
+        JsonNode existing=findIntegrationClient(token,id);
+        if(existing!=null && !app.equals(existing.path("attributes").path("identityos.application_id").asText()))
+            throw new IllegalStateException("Client ID is already owned by another integration");
+        Map<String,Object> body=new LinkedHashMap<>();
+        body.put("clientId",id);body.put("enabled",true);body.put("protocol","openid-connect");
+        body.put("publicClient",!machine && "public".equals(config.clientType()));
+        body.put("standardFlowEnabled",!machine);body.put("implicitFlowEnabled",false);
+        body.put("directAccessGrantsEnabled",false);body.put("serviceAccountsEnabled",machine);
+        body.put("fullScopeAllowed",false);
+        body.put("redirectUris",machine?List.of():config.redirectUris());
+        body.put("webOrigins",machine?List.of():config.webOrigins());
+        List<String> clientScopes=new java.util.ArrayList<>(List.of("profile","email","roles","basic"));
+        if(machine) for(String scope:List.of("identityos:authorize","identityos:consent","identityos:audit")) {
+            ensureIntegrationScope(token,scope);clientScopes.add(scope);
+        }
+        if(!machine) for(String scope:config.scopes()) {
+            if(!List.of("openid","profile","email","roles","basic").contains(scope)) {
+                ensureIntegrationScope(token,scope);clientScopes.add(scope);
+            }
+        }
+        body.put("defaultClientScopes",clientScopes);
+        body.put("optionalClientScopes",List.of());
+        body.put("attributes",Map.of("identityos.application_id",app,"pkce.code.challenge.method","S256",
+            "post.logout.redirect.uris",String.join("##",config.postLogoutRedirectUris())));
+        List<Map<String,Object>> mappers=new java.util.ArrayList<>();
+        mappers.add(hardcodedClaim("organization_id",org));mappers.add(hardcodedClaim("application_id",app));
+        mappers.add(audienceMapper("identity-os-integration"));
+        if(machine) {
+            mappers.add(audienceMapper("identity-os-services"));
+        } else {
+            mappers.add(audienceMapper(app));
+            mappers.add(Map.of("name","external username","protocol","openid-connect","protocolMapper","oidc-usermodel-attribute-mapper",
+                "config",Map.of("user.attribute","external_username","claim.name","external_username","jsonType.label","String",
+                    "access.token.claim","true","id.token.claim","true","userinfo.token.claim","true")));
+        }
+        body.put("protocolMappers",mappers);
+        if(existing==null) {
+            try { restClient.post().uri("/admin/realms/"+targetRealm+"/clients").headers(h->h.setBearerAuth(token))
+                .contentType(MediaType.APPLICATION_JSON).body(body).retrieve().toBodilessEntity(); }
+            catch(HttpClientErrorException.Conflict race) { /* Re-read and verify ownership on retry. */ }
+            existing=findIntegrationClient(token,id);
+            if(existing==null || !app.equals(existing.path("attributes").path("identityos.application_id").asText()))
+                throw new IllegalStateException("Client provisioning conflict");
+        } else {
+            restClient.put().uri("/admin/realms/"+targetRealm+"/clients/"+existing.path("id").asText())
+                .headers(h->h.setBearerAuth(token)).contentType(MediaType.APPLICATION_JSON).body(body).retrieve().toBodilessEntity();
+        }
+        String uuid=existing.path("id").asText();
+        JsonNode optionalScopes=restClient.get().uri("/admin/realms/"+targetRealm+"/clients/"+uuid+"/optional-client-scopes")
+            .headers(h->h.setBearerAuth(token)).retrieve().body(JsonNode.class);
+        for(JsonNode scope:optionalScopes) restClient.delete()
+            .uri("/admin/realms/"+targetRealm+"/clients/"+uuid+"/optional-client-scopes/"+scope.path("id").asText())
+            .headers(h->h.setBearerAuth(token)).retrieve().toBodilessEntity();
+        JsonNode currentScopes=restClient.get().uri("/admin/realms/"+targetRealm+"/clients/"+uuid+"/default-client-scopes")
+            .headers(h->h.setBearerAuth(token)).retrieve().body(JsonNode.class);
+        for(JsonNode scope:currentScopes) if(!clientScopes.contains(scope.path("name").asText())) {
+            restClient.delete().uri("/admin/realms/"+targetRealm+"/clients/"+uuid+"/default-client-scopes/"+scope.path("id").asText())
+                .headers(h->h.setBearerAuth(token)).retrieve().toBodilessEntity();
+        }
+        JsonNode availableScopes=restClient.get().uri("/admin/realms/"+targetRealm+"/client-scopes")
+            .headers(h->h.setBearerAuth(token)).retrieve().body(JsonNode.class);
+        for(JsonNode scope:availableScopes) if(clientScopes.contains(scope.path("name").asText())) {
+            restClient.put().uri("/admin/realms/"+targetRealm+"/clients/"+uuid+"/default-client-scopes/"+scope.path("id").asText())
+                .headers(h->h.setBearerAuth(token)).retrieve().toBodilessEntity();
+        }
+        if(!machine) {
+            Set<String> allowed=new java.util.HashSet<>(List.of("APPLICATION_USER","APPLICATION_SUPER_ADMIN"));
+            allowed.addAll(config.roleMappings().keySet());
+            JsonNode currentRoles=restClient.get().uri("/admin/realms/"+targetRealm+"/clients/"+uuid+"/scope-mappings/realm")
+                .headers(h->h.setBearerAuth(token)).retrieve().body(JsonNode.class);
+            List<JsonNode> removedRoles=new ArrayList<>();
+            for(JsonNode role:currentRoles) if(!allowed.contains(role.path("name").asText())) removedRoles.add(role);
+            if(!removedRoles.isEmpty()) restClient.method(HttpMethod.DELETE)
+                .uri("/admin/realms/"+targetRealm+"/clients/"+uuid+"/scope-mappings/realm")
+                .headers(h->h.setBearerAuth(token)).body(removedRoles).retrieve().toBodilessEntity();
+            for(String role:allowed) {
+                try { JsonNode representation=getRealmRole(token,role);
+                    restClient.post().uri("/admin/realms/"+targetRealm+"/clients/"+uuid+"/scope-mappings/realm")
+                        .headers(h->h.setBearerAuth(token)).body(List.of(representation)).retrieve().toBodilessEntity();
+                } catch(HttpClientErrorException.NotFound absent) { /* Optional source role has not been defined. */ }
+            }
+        }
+        return uuid;
+    }
+
+    private void ensureIntegrationScope(String token,String scope) {
+        JsonNode scopes=restClient.get().uri("/admin/realms/"+targetRealm+"/client-scopes")
+            .headers(h->h.setBearerAuth(token)).retrieve().body(JsonNode.class);
+        for(JsonNode existing:scopes) if(scope.equals(existing.path("name").asText())) {
+            if(!"openid-connect".equals(existing.path("protocol").asText())) throw new IllegalStateException("Scope protocol conflict");
+            return;
+        }
+        try { restClient.post().uri("/admin/realms/"+targetRealm+"/client-scopes").headers(h->h.setBearerAuth(token))
+            .body(Map.of("name",scope,"protocol","openid-connect","attributes",Map.of("include.in.token.scope","true")))
+            .retrieve().toBodilessEntity(); }
+        catch(HttpClientErrorException.Conflict race) { /* Another provisioning request created the same scope. */ }
+    }
+
+    private Map<String,Object> hardcodedClaim(String name,String value) {
+        return Map.of("name","identityos-"+name,"protocol","openid-connect","protocolMapper","oidc-hardcoded-claim-mapper",
+            "config",Map.of("claim.name",name,"claim.value",value,"jsonType.label","String",
+                "access.token.claim","true","id.token.claim","false","userinfo.token.claim","false"));
+    }
+    private Map<String,Object> audienceMapper(String audience) {
+        return Map.of("name","identityos-audience-"+audience,"protocol","openid-connect","protocolMapper","oidc-audience-mapper",
+            "config",Map.of("included.custom.audience",audience,"access.token.claim","true","id.token.claim","false"));
+    }
+
     private String requestAdminToken() {
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
-        form.add("grant_type", "password");
         form.add("client_id", clientId);
-        form.add("username", username);
-        form.add("password", password);
+        if (adminClientSecret != null && !adminClientSecret.isBlank()) {
+            form.add("grant_type", "client_credentials");
+            form.add("client_secret", adminClientSecret);
+        } else {
+            form.add("grant_type", "password");
+            form.add("username", username);
+            form.add("password", password);
+        }
 
         JsonNode response = restClient.post()
             .uri("/realms/" + adminRealm + "/protocol/openid-connect/token")
@@ -580,11 +750,14 @@ public class KeycloakAdminClient {
         putIfPresent(user, "lastName", submittedFields.get("lastName"));
         user.putIfAbsent("firstName", profileFirstName(externalUsername));
         user.putIfAbsent("lastName", profileLastName());
-        user.put("attributes", Map.of(
+        Map<String,List<String>> identityAttributes = new LinkedHashMap<>(Map.of(
                 "organization_id", List.of(organizationId),
                 "application_id", List.of(applicationId),
                 "client_id", List.of(clientId),
                 "external_username", List.of(externalUsername)));
+        Object externalId = submittedFields.get("external_user_id");
+        if (externalId != null && !externalId.toString().isBlank()) identityAttributes.put("external_user_id", List.of(externalId.toString()));
+        user.put("attributes", identityAttributes);
         if (password != null && !password.isBlank()) {
             user.put("credentials", List.of(Map.of(
                     "type", "password",
