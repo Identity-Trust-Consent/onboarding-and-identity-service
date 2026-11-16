@@ -7,6 +7,8 @@ spring:
     password: ${DB_PASSWORD:Welcome@123}
     driver-class-name: org.postgresql.Driver
     hikari:
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:3}
+      minimum-idle: ${DB_POOL_MIN_IDLE:1}
       connection-timeout: 5000
       validation-timeout: 3000
       initialization-fail-timeout: 0
@@ -57,7 +59,7 @@ identity-os:
     organization-id: ${IDENTITY_OS_ORGANIZATION_ID:org_self_hosted}
     organization-name: ${IDENTITY_OS_ORGANIZATION_NAME:DashboardWithChatbot}
     application-id: ${IDENTITY_OS_APPLICATION_ID:app_b713e8eeab81}
-    application-name: ${IDENTITY_OS_APPLICATION_NAME:SBI ERP App}
+    application-name: ${IDENTITY_OS_APPLICATION_NAME:Employee Management System}
     application-type: ${IDENTITY_OS_APPLICATION_TYPE:web}
     application-description: ${IDENTITY_OS_APPLICATION_DESCRIPTION:DashboardWithChatbot using Identity OS}
     redirect-uri: ${IDENTITY_OS_REDIRECT_URI:http://localhost:9091/callback}

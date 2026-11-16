@@ -40,7 +40,7 @@ public class SelfHostedBootstrapService implements ApplicationRunner {
             @Value("${identity-os.self-hosted.admin.email:}") String adminEmail,
             @Value("${identity-os.self-hosted.admin.password:}") String adminPassword,
             @Value("${identity-os.self-hosted.application-id:app_b713e8eeab81}") String applicationId,
-            @Value("${identity-os.self-hosted.application-name:SBI ERP App}") String applicationName,
+            @Value("${identity-os.self-hosted.application-name:Employee Management System}") String applicationName,
             @Value("${identity-os.self-hosted.application-type:web}") String applicationType,
             @Value("${identity-os.self-hosted.application-description:Self-hosted application using Identity OS}") String applicationDescription,
             @Value("${identity-os.self-hosted.redirect-uri:http://localhost:9091/callback}") String redirectUri) {
