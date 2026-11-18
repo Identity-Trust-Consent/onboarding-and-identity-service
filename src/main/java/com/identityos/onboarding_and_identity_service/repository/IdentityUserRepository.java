@@ -151,7 +151,7 @@ public class IdentityUserRepository {
                        iu.status,
                        iu.source,
                        iu.created_at,
-                       iu.updated_at
+                       iu.updated_at, iu.keycloak_user_id
                 FROM identity_users iu
                 JOIN applications a ON a.application_id = iu.application_public_id
                 JOIN organizations o ON o.id = a.organization_id
@@ -172,7 +172,7 @@ public class IdentityUserRepository {
                         resultSet.getString("status"),
                         resultSet.getString("source"),
                         toLocalDateTime(resultSet.getTimestamp("created_at")),
-                        toLocalDateTime(resultSet.getTimestamp("updated_at"))),
+                        toLocalDateTime(resultSet.getTimestamp("updated_at")), resultSet.getString("keycloak_user_id")),
                 organizationId);
     }
 
@@ -192,7 +192,7 @@ public class IdentityUserRepository {
                        iu.status,
                        iu.source,
                        iu.created_at,
-                       iu.updated_at
+                       iu.updated_at, iu.keycloak_user_id
                 FROM identity_users iu
                 JOIN applications a ON a.application_id = iu.application_public_id
                 WHERE iu.application_public_id = ?
@@ -213,7 +213,7 @@ public class IdentityUserRepository {
                         resultSet.getString("status"),
                         resultSet.getString("source"),
                         toLocalDateTime(resultSet.getTimestamp("created_at")),
-                        toLocalDateTime(resultSet.getTimestamp("updated_at"))))
+                        toLocalDateTime(resultSet.getTimestamp("updated_at")), resultSet.getString("keycloak_user_id")))
                         : Optional.empty(),
                 applicationPublicId,
                 username);

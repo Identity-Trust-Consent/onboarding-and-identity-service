@@ -142,7 +142,9 @@ public class HostedIdentityService {
                 request.clientId(),
                 externalUsername,
                 response);
-        recordLoginSignal(application, externalUsername, "LOGIN_SUCCESS", "SUCCESS", Map.of("tokenType", response.tokenType()));
+        String canonicalSubject = identityUserRepository.findByApplicationAndUsername(application.applicationId(), externalUsername)
+                .map(IdentityUserResponse::subjectId).orElse(null);
+        trustSignalClient.recordLogin(response.accessToken(), application.organizationId(), application.applicationId(), canonicalSubject);
         return response;
     }
 

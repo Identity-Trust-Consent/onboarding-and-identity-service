@@ -18,6 +18,7 @@ public record IdentityUserResponse(
         String status,
         String source,
         LocalDateTime createdAt,
-        LocalDateTime updatedAt
+        LocalDateTime updatedAt,
+        String subjectId
 ) {
 }
